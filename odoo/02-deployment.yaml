@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: odoo
+  namespace: odoo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: odoo
+  template:
+    metadata:
+      labels:
+        app: odoo
+    spec:
+      initContainers:
+        - name: install-requirements
+          securityContext:
+            runAsUser: 0
+          image: odoo:${ODOO_VERSION}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              if [ -f /mnt/extra-addons/requirements.txt ]; then
+                echo "📦 Installing Python dependencies from requirements.txt..."
+                pip3 install --no-cache-dir -r /mnt/extra-addons/requirements.txt
+                echo "✅ Dependencies installed"
+              fi
+              
+              # COPIAR CONFIGURACION A VOLUMEN PERSISTENTE
+              echo "⚙️  Setting up writable configuration..."
+              cp /etc/odoo-ro/odoo.conf /var/lib/odoo/odoo.conf
+              
+              echo "Fixing permissions (NUCLEAR)..."
+              mkdir -p /var/lib/odoo/sessions
+              mkdir -p /var/lib/odoo/filestore
+              chown -R 101:101 /var/lib/odoo
+              chmod 777 /var/lib/odoo
+              chmod 777 /var/lib/odoo/sessions
+              chmod 777 /var/lib/odoo/filestore
+              chmod 640 /var/lib/odoo/odoo.conf
+              echo "Permissions fixed."
+              
+              if [ -f /mnt/oca-addons/requirements.txt ]; then
+                echo "📦 Installing OCA dependencies..."
+                pip3 install --no-cache-dir -r /mnt/oca-addons/requirements.txt
+              fi
+          volumeMounts:
+            - name: extra-addons
+              mountPath: /mnt/extra-addons
+            - name: oca-addons
+              mountPath: /mnt/oca-addons
+            - name: odoo-config
+              mountPath: /etc/odoo-ro
+            - name: odoo-data
+      initContainers:
+        - name: fix-permissions
+          image: busybox
+          command: ["sh", "-c", "chmod -R 777 /var/lib/odoo && chown -R 101:101 /var/lib/odoo"]
+          volumeMounts:
+            - name: odoo-data
+              mountPath: /var/lib/odoo
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: odoo
+          image: odoo:19
+          imagePullPolicy: Always
+          # Manual mode: Start Odoo directly to allow Web UI creation
+          command: ["/bin/bash", "-c", "odoo -c /etc/odoo-ro/odoo.conf"]
+          ports:
+            - containerPort: 8069
+              name: http
+            - containerPort: 8072
+              name: websocket
+          env:
+            - name: HOST
+              value: postgresql.postgresql.svc.cluster.local
+            - name: USER
+              value: odoo
+            - name: PASSWORD
+              value: odoo
+            - name: LANG
+              value: C.UTF-8
+            - name: LC_ALL
+              value: C.UTF-8
+            - name: PYTHONIOENCODING
+              value: utf-8
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "150m"
+            limits:
+              memory: "2560Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: odoo-data
+              mountPath: /var/lib/odoo
+            # Sessions estan dentro de /var/lib/odoo/sessions ahora (persistencia)
+            - name: odoo-config
+              mountPath: /etc/odoo-ro
+            - name: extra-addons
+              mountPath: /mnt/extra-addons
+            - name: oca-addons
+              mountPath: /mnt/oca-addons
+          livenessProbe:
+            tcpSocket:
+              port: 8069
+            initialDelaySeconds: 600
+            periodSeconds: 60
+          readinessProbe:
+            tcpSocket:
+              port: 8069
+            initialDelaySeconds: 60
+            periodSeconds: 10
+      volumes:
+        - name: odoo-config
+          configMap:
+            name: odoo-config
+            items:
+            - key: odoo.conf
+              path: odoo.conf
+            - key: init_db.sh
+              path: init_db.sh
+        - name: odoo-data
+          persistentVolumeClaim:
+            claimName: odoo-data
+        - name: extra-addons
+          persistentVolumeClaim:
+            claimName: odoo-extra-addons
+        - name: oca-addons
+          persistentVolumeClaim:
+            claimName: odoo-oca-addons
